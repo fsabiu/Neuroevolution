@@ -1,0 +1,409 @@
+---
+title: "Neuroevolution"
+author: "Francesco Sabiu"
+date: "3/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Aim of the project
+
+Neuroevolution is a branch of Artificial Intelligence that uses evolutionary algorithms to generate Artificial Neural Networks, together with their parameters and topology. <br />
+In this project we use a Genetic Algorithm to determine the *best* (https://link.springer.com/article/10.1007/s13748-016-0091-3) structure of a Neural Network, mainly focusing our work on the training phase. <br />
+In this R Markdown, our attention is focused on coding, while further considerations, comments and results analysis are described in the attached report.
+
+Let us install the required packages (execute the following commands just the first time)
+```{r}
+#install.packages("neuralnet")
+#install.packages("GA")
+#install.packages("ggsn")
+#install.packages("parallel")
+#install.packages("doParallel")
+#install.packages("stringr")
+```
+
+## Data Understanding
+
+Reading datasets
+```{r}
+# Breast Cancer
+BC <- read.csv("datasets/wdbc.data", sep=",", header = TRUE)
+```
+
+
+### Data semantics
+
+Let us explore datasets
+```{r}
+head(BC)
+```
+
+Since datasets semantics is beyond the scope of this notebook, it is presented in the attached report. <br />
+Here, we concentrate on implementation and concerning semantics we limit ourselves to observing that, according to the cited documentation, the first column of Breast Cancer dataset represents the "Sample code number": we retain it useless for our goals, hence we drop it from the dataset. <br />
+```{r}
+# Removing 1st BC column
+BC = subset(BC, select = -c(1))
+```
+
+### Variables distribution and statistics
+
+```{r}
+summary(BC)
+```
+
+Plotting target distribution
+
+```{r}
+classes = unique(BC["M"])
+values = as.data.frame(table(BC["M"]))[2]
+total = nrow(BC)
+
+count.data <- data.frame(
+  class = classes,
+  n = c(values[1,1], values[2,1]),
+  prop = c(round((values[1,1]/total)*100, digits = 2), round((values[2,1]/total)*100, digits = 2))
+)
+
+count.data
+```
+
+```{r}
+# Add label position
+library("dplyr")
+count.data <- count.data %>%
+  arrange(desc(M)) %>%
+  mutate(lab.ypos = cumsum(prop) - 0.5*prop)
+count.data
+```
+
+
+```{r}
+library(ggplot2)
+
+mycols <- c("#0073C2FF", "#EFC000FF")
+
+ggplot(count.data, aes(x = 2, y = prop, fill = M)) +
+  geom_bar(stat = "identity", color = "white") +
+  coord_polar(theta = "y", start = 0)+
+  geom_text(aes(y = lab.ypos, label = prop), color = "white", size=4)+
+  scale_fill_manual(values = mycols) +
+  theme_void()+
+  xlim(0.5, 2.5)
+```
+
+### Data quality
+
+```{r}
+head(BC)
+```
+
+
+
+```{r}
+names(BC) %>%
+lapply(function(x) {
+      which(is.na(BC[x]))
+  }) -> null_values
+
+names(null_values) <- names(BC)
+null_values
+```
+No missing values
+
+## Neural network
+
+```{r}
+
+colnames(BC)[1] <- "Malignant"
+BC$Malignant <- as.numeric(BC$Malignant == 'M')
+
+head(BC)
+```
+
+
+### Splitting dataset
+```{r}
+library(caTools)
+
+set.seed(6) # make the results reproducible
+
+inx <- sample.split(seq_len(nrow(BC)), 0.75)
+BCtrain <- BC[inx, ]
+BCtest <-  BC[!inx, ]
+
+head(BCtrain)
+head(BCtest)
+```
+
+### Training
+
+#### Cross validation
+Now, let's perform a 10-fold cross validation using BCtrain
+```{r}
+k = 10
+
+# Creating folds
+folds <- cut(seq(nrow(BCtrain)), breaks = k, labels = FALSE)
+
+# Allocating accuracy k-dimensional array
+accuracy <- rep(NA, k)
+
+# Creating formula
+fea <- paste(names(BCtrain[3:ncol(BCtrain)]), collapse = ' + ') # features
+form <- as.formula(c("Malignant ~ " , fea))
+```
+
+
+#### Running
+
+```{r}
+library(neuralnet)
+
+# Initial timestamp
+start_time <- Sys.time()
+
+for (i in seq(k)) {
+  # Split train and test data
+  test_indexes <- which(folds == i, arr.ind = TRUE)
+  test_data <- BCtrain[test_indexes,-c(1)]
+  train_data <- BCtrain[-test_indexes,]
+  
+  # Correct output for test data
+  actual <- BCtrain[test_indexes,1]
+  
+  # Create Models with Train Data
+  nn <- neuralnet(form, train_data, hidden = c(8), linear.output = FALSE, threshold = 0.1, act.fct = "tanh",rep = 10, # Parameter
+                    learningrate = 0.3,)
+
+  # Run test data through neural networks
+  results <- compute(nn,test_data)
+  
+  # Get estimates from the test results
+  estimate <- round(results$net.result) 
+  
+  # Calculate accuracies from estimates
+  accuracy[i] <- mean(estimate == actual)
+}
+
+# Final timestamp
+end_time <- Sys.time()
+
+mean(accuracy)
+end_time - start_time
+```
+One cross-validation of training of this simple model lasted about 15 seconds and led to a 91% mean accuracy.
+
+## Genetic Algorithm
+The next step will consist of running different cross-validations whose network parameters will be defined by the Genetic Algorithm.
+
+Firstly, let us run an example of Genetic Algorithm.
+We will use GA R library: https://www.rdocumentation.org/packages/GA/versions/3.2.
+
+Installing (run only the first time)
+```{r}
+#install.packages("GA")
+```
+
+Using GA library
+```{r}
+library(GA)
+```
+
+### Example
+Let us run an example
+```{r}
+# Function to optimize
+f <- function(x)  (x^2+x)*cos(x)
+
+# Range
+from <- -10
+to <- 10
+
+curve(f, from = from, to = to, n = 1000)
+```
+
+Defining genetic algorithm (non parallel)
+```{r}
+# Initial timestamp
+start_time <- Sys.time()
+
+GA <- ga(type = "real-valued", 
+         fitness = f, 
+         lower = c(th = from), 
+         upper = to,
+         parallel= FALSE,
+         maxiter = 100)
+
+# final timestamp
+end_time <- Sys.time()
+
+#summary(GA)
+end_time - start_time
+```
+
+
+Plotting fitness value for each iteration
+```{r}
+plot(GA)
+```
+
+Plotting curve and best individual
+```{r}
+curve(f, from = from, to = to, n = 1000)
+points(GA@solution, GA@fitnessValue, col = 2, pch = 19)
+```
+
+
+
+## Neuroevolution: combining GA with NN
+The goal of this section is to use a Genetic Algorithm for the search of the best parameters for the Neural Network.
+
+We will use the same structure for all the neural network that we will evaluate, that is the following:
+
+* Number of hidden layers: 1
+* Number of neurons in the hidden layer: 11
+* Weight update rule: Backpropagation
+
+The (hyper)parameters whose best value will by found by means of the Genetic Algorithm are:
+
+* Number of epochs: from 400 to 2000
+* Learning rate from 0 to 0.7
+
+
+Fitness function (higher is better)
+```{r}
+# Returns the mean accuracy of a 10-fold cross validation over the training set, with given parameters
+getAccuracy <- function(epochs, l_rate) {
+  
+  # Rounding epochs parameter!
+  epochs = as.integer(round(epochs))  # To be considered in result analysis
+  
+  # Nr of folds
+  k = 10
+
+  # Creating folds
+  folds <- cut(seq(nrow(BCtrain)), breaks = k, labels = FALSE)
+  
+  # Allocating accuracy k-dimensional array
+  accuracy <- rep(NA, k)
+  
+  # Creating formula
+  fea <- paste(names(BCtrain[3:ncol(BCtrain)]), collapse = ' + ') # features
+  form <- as.formula(c("Malignant ~ " , fea))
+  
+  # Cross validation
+  for (i in seq(k)) {
+    # Split train and test data
+    test_indexes <- which(folds == i, arr.ind = TRUE)
+    test_data <- BCtrain[test_indexes,-c(1)]
+    train_data <- BCtrain[-test_indexes,]
+    
+    # Correct output for test data
+    actual <- BCtrain[test_indexes,1]
+    
+    # Create Models with train_data
+    nn <- neuralnet(form, 
+                    train_data, # Fixed
+                    hidden = c(11), # Fixed
+                    linear.output = FALSE, # Fixed
+                    threshold = 0.1, # Fixed
+                    err.fct = "ce", # Fixed
+                    rep = epochs, # Parameter
+                    learningrate = l_rate, # Parameter
+                    )
+  
+    # Compute test data
+    results <- compute(nn,test_data)
+    
+    # Get estimates from the test results
+    estimate <- round(results$net.result) 
+    
+    # Calculate accuracies from estimates
+    accuracy[i] <- mean(estimate == actual)
+  }
+  
+  fitness_value = mean(accuracy)
+  
+  print(epochs)
+  print(l_rate)
+  print(fitness_value)
+  print("Performed")
+  
+  return(mean(accuracy))
+}
+
+```
+
+
+
+Genetic Algorithm
+```{r echo=TRUE}
+# Initial timestamp
+start_time <- Sys.time()
+
+GA <- ga(type = "real-valued", 
+         fitness =  function(x) -getAccuracy(x[1], x[2]),
+         lower = c(1, 0.2), upper = c(5, 0.7), 
+         popSize = 30, maxiter = 80, run = 6)
+
+# Final timestamp
+end_time <- Sys.time()
+
+elapsed_time = end_time - start_time
+elapsed_time
+```
+
+
+Results
+```{r}
+summary(GA)
+```
+
+```{r}
+plot(GA)
+```
+
+
+
+```{r}
+# Instantiating best Neural Network
+epochs = as.integer(round(GA@solution[1])) # Best epoch parameter (rounded)
+learning_rate = GA@solution[2]
+
+# Create Models with train_data
+nn <- neuralnet(form, 
+                BCtrain, # Fixed
+                hidden = c(11), # Fixed
+                linear.output = FALSE, # Fixed
+                threshold = 0.1, # Fixed
+                err.fct = "ce", # Fixed
+                rep = epochs, # Parameter
+                learningrate = l_rate, # Parameter
+                )
+
+# Testing
+test_data <- BCtest[-c(1)]
+
+# Run test data through neural networks
+results <- compute(nn, test_data)
+  
+# Get estimates from the test results
+estimate <- round(results$net.result)
+    
+# Correct output for test data
+actual <- BCtest[1]
+  
+  
+# Evaluation
+accuracy <- mean(estimate == actual)
+
+accuracy
+```
+
+
+
+
+
